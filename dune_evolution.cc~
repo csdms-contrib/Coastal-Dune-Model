@@ -1,0 +1,515 @@
+/******************************************************************************
+  $Id: dune_evolution.cc,v 1.32 2005/04/26 14:26:53 duran Exp $
+******************************************************************************/
+
+#include <stdlib.h>
+#include <float.h>
+#include <math.h>
+
+#include "globals.h"
+#include "dune_evolution.h"
+#include "shear.h"
+#include "wind.h"
+#include "flux_stationary.h"
+#include "initsurf.h"
+#include "avalanche.h"
+#include "influx.h"
+#include "shear_hlr.h"
+#include "analyze_new.h"
+
+#include "func.h"
+
+
+//*****************************************************************************
+//  class dune_evol_3d
+
+
+/*!  The pointers to calculation objects are written to member variables.
+  Space for all two-dimensional arrays is allocated, and m_h is initialised
+  with \a i and m_h_nonerod with i_nonerod.  It is ensured that h is nowhere
+  below h_nonerod.  */
+
+
+dune_evol_3d::dune_evol_3d(const dunepar& par) : evolution(par)
+{
+  arrayinit *init_h;
+  arrayinit *init_veget;
+
+  if( !duneglobals::sim3d() ) {
+    cerr << "dune_evol_3d Constructor: FATAL ERROR: This class mustn't be used in 2D simulations!" << endl;
+    exit(1);
+  }
+  m_calcshear= new shearHLR(par);
+  m_wind= wind::create(par);
+  m_influx= influx::create(par);
+  m_calcflux= new flux3d_stationary(par);
+  m_avalanche= avalanche::create(par);
+  
+  m_analyze = new analyze(par);
+  
+  /* Selecting boundary conditions*/
+  m_x_periodic = par.getdefault("calc.x_periodic", false);
+  m_y_periodic = par.getdefault("calc.y_periodic", false);
+
+  m_dtmax = par.getdefault("salt.dt_h_max", 0.0);
+  m_dhmax = par.getdefault("salt.dh_max", 0.05 * duneglobals::dx());
+  m_update_xmin = par.getdefault("update.xmin", 0);
+  m_fix_every = par.getdefault("update.fix_every", 0);
+  m_fix_count = m_fix_every;
+  m_shiftback = par.getdefault("calc.shift_back", true);
+  m_shiftback_target_cm0= par.getdefault("shift_back.cm0", false);
+  m_shiftback_centrex_cmT= par.getdefault("shift_back.cmT", false);
+  m_shift_dist_x= m_shift_dist_y= 0.0;
+  m_curr_wind= 0.0;
+  m_vol_correct = par.getdefault("calc.volume.correction", true);
+  m_calc_analyze = par.getdefault("calc.analyze", true);
+
+  /*Vegetation parameters*/
+  m_calc_veget = par.getdefault("calc.vegetation", false);
+  m_veget_0 = par.getdefault("vegetation.init.value", 0.0);
+  m_update_xmin_veget = par.getdefault("update.xmin_veget", 0);
+  m_h_veget = par.getdefault("vegetation.Max.height", 1.0);
+  m_veget_erosion = par.getdefault("vegetation.erosion", 1.0);
+  m_veget_deposition = par.getdefault("vegetation.deposition", 1.0);
+  m_omega = par.getdefault("vegetation.omega", 0.);
+  m_t = par.getdefault("vegetation.t", 1e4);
+  m_veget_limit = par.getdefault("vegetation.erosion.limit", 1.);
+  m_veget_grow_eros = par.getdefault("vegetation.grow.eros", 1.0);
+  m_veget_root = par.getdefault("vegetation.root", false);
+  m_rhofactor= par.getdefault("vegetation.sigma", 1.0)*
+                    par.getdefault("vegetation.sigma", 1.0)/(duneglobals::dx()*duneglobals::dx());
+
+  /*Functions creation*/
+  m_h.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx(), 0.0);
+  m_h_nonerod.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx(), 0.0);
+  m_dh_dt.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx(), 0.0);
+  m_tau.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx(), vec2(0.0, 0.0));
+  m_flux.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx(), vec2(0.0, 0.0));
+  m_gamma.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx(), 0.0);
+
+  m_veget.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx(), 0.0);
+  m_veget_pos.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx() );
+  m_veget_haux.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx() );
+  
+  /* Surface initialization*/
+  /*if( duneglobals::startstep()> 0 ) {
+    std::ostringstream fnamestream;
+    
+    // This has to be kept consistent with the file names from 
+    // dunedata::open_writeout - ugly
+    fnamestream << duneglobals::datadir() << "/h." << setw(5) << 
+		setfill('0') << duneglobals::startstep() << ".dat";
+    init_h= new arrayinit_ascii( fnamestream.str(),
+		par.getdefault("save.x-line", true), 1.0 );
+    cout << "dune_evol_gamma constructor: Warning: continuing simulation - "
+	    "ignoring height initialisation parameters and reading height "
+	    "profile from " << fnamestream.str() << "\n";
+  }
+  else*/
+	
+
+    init_h= arrayinit::create(par);
+  init_h->init_2d_scal( m_h );
+  delete init_h;
+  
+  if( par.exists("nonerod.Init-Surf") ) 
+    init_h= arrayinit::create(par, "nonerod.");
+  else
+    init_h= new CInitSurfPlain(0.0);
+  
+  init_h->init_2d_scal( m_h_nonerod );
+  delete init_h;
+  for( int x= 0; x< duneglobals::nx(); ++x )
+    for( int y= 0; y< duneglobals::ny(); ++y )
+      if( m_h(x, y) < m_h_nonerod(x, y) )
+        m_h(x, y)= m_h_nonerod(x, y); 
+
+  /*Vegetation inicialization*/	
+  if(par.getdefault("veget.Init", false)){
+  	double x0 = par.getdefault("veget.Init.x0", 0.5)*duneglobals::nx();
+  	double y0 = 0.5*duneglobals::ny();
+  	double R = par.getdefault("veget.Init.R", 0.05)*duneglobals::nx();
+  	for( int x= m_update_xmin_veget; x< duneglobals::nx(); ++x )
+    		for( int y= 0; y< duneglobals::ny(); ++y ){
+    			double Y2 = R*R-(x-x0)*(x-x0);
+    			if(fabs(x-x0) < R && (y-y0)*(y-y0)<Y2){
+				m_veget(x,y)= 0;
+				m_veget_pos(x,y)= 0;
+			}else{
+				m_veget(x,y)= 0.999*m_h_veget;
+				m_veget_pos(x,y)= m_h(x,y);
+			}
+  		}
+  }else{
+  	if( par.exists("veget.Init-Surf") ) 
+    		init_veget= arrayinit::create(par, "veget.");
+  	else
+    		init_veget= new CInitSurfPlain(0.0);
+  	init_veget->init_2d_scal( m_veget );
+  	if( par.exists("veget.Pos.Init-Surf") ) 
+    		init_veget= arrayinit::create(par, "veget.Pos.");
+  	else
+    		init_veget= new CInitSurfPlain(0.0);
+  	init_veget->init_2d_scal( m_veget_pos );
+  	delete init_veget;
+  }
+  //m_veget.SetAll(m_veget_0);
+  //m_veget_pos.SetAll(0.0);
+  
+  m_targetcentrex= m_h.CenterOfMassX()/duneglobals::dx();
+  m_centrex= duneglobals::nx()/2;
+  m_centrex_rot= duneglobals::nx()/2;
+  m_Satflux_upwind = (m_wind->u_star()==0? 0 : m_calcflux->Satflux_upwind(m_wind->u_star()));
+  cout << "!!!Flux0 = " << m_Satflux_upwind << endl;
+  
+  double SatLength_upwind = (m_wind->u_star()==0? 0 : m_calcflux->SatLength_upwind(m_wind->u_star()));
+  cout << "!!!ls = " << SatLength_upwind << endl;
+}
+
+
+/*!  Deletes all objects performing parts of the calculation, which were
+  created in the constructor.  */
+
+dune_evol_3d::~dune_evol_3d()
+{
+  delete m_avalanche;
+  delete m_calcflux;
+  delete m_influx;
+  delete m_wind;
+  delete m_calcshear;
+  delete m_analyze;
+}
+
+
+/*!  Saves the two-dimensional arrays m_h, m_tau and m_flux.  The difference
+    between h and the non-erodable surface is computed and saved as h_deposit.  */
+
+void dune_evol_3d::save_arrays()
+{ 
+  if( m_curr_wind != 0.0 ) {
+    double angle= 2.0*M_PI*m_curr_wind;
+    m_h.rotate(angle, (int)round(m_centrex_rot), duneglobals::ny()/2, 1);
+    m_h_nonerod.rotate(angle, (int)round(m_centrex_rot), duneglobals::ny()/2, 0);
+    if(m_calc_veget){
+		m_veget.rotate(angle, (int)round(m_centrex_rot), duneglobals::ny()/2, 0);
+		m_veget_pos.rotate(angle, (int)round(m_centrex_rot), duneglobals::ny()/2, 0);
+    }
+    m_curr_wind= 0.0;
+  }
+  
+  TFktScal h_deposit(m_h);
+  
+
+  save_2d_scalarray( "dhdt", m_dh_dt );
+  save_2d_scalarray( "h", m_h );
+  h_deposit -= m_h_nonerod;
+  save_2d_scalarray( "h_deposit", h_deposit );
+  save_2d_scalarray( "h_nonerod", m_h_nonerod );
+  save_2d_vecarray( "shear", m_tau );
+  save_2d_vecarray( "flux", m_flux );
+  if(m_calc_veget){ 
+  	save_2d_scalarray( "veget", m_veget );
+	save_2d_scalarray( "veget_pos", m_veget_pos );
+  }
+}
+
+
+/*!  This is the function which computes the actual change in the surface
+  profile.  The method for time evolution is forward Euler.  First, the shear
+  stress is computed with the help of m_calcshear.  Then the sand flux is
+  calculated with m_calcflux.  The rate of change of the height profile is
+  calculated as the divergence of the flux divided by the sand density.  m_h is
+  changed according to this rate with a time step which is at most m_dtmax
+  (parameter salt.dt_h_max in the .par file) and which is small enough that the
+  change in height is at most m_dhmax (parameter salt.dh_max).  */
+
+double dune_evol_3d::step_implementation()
+{
+  double newwind, angle, timestep, halfmeanLength = 0, m_ustar0, meanFlux = 0, meanVegetRho= 0, factor=0;
+  int xshift, x_ext = 0;
+
+  m_wind->advance( evolution::time() );
+  newwind= m_wind->direction();
+  m_ustar0 = m_wind->u_star();
+  //double arg = 2.0*M_PI*m_omega*evolution::time();
+  //m_ustar0 *= 1.0-0.5*(cos(arg)*cos(arg));
+  cout << "dune_evol_3d::step_implementation: step " << steps()+1 << 
+	": wind direction " << newwind*360 << " deg., u* " << m_ustar0 << " m/s\n";
+	
+  if(m_ustar0 > 0.6*duneglobals::u_star_ft()){
+  	m_Satflux_upwind = (m_ustar0 > duneglobals::u_star_ft() ? m_calcflux->Satflux_upwind(m_ustar0) : 0.0);
+	cout << "!!!Flux0 = " << m_Satflux_upwind << endl;
+	
+  	if( newwind != m_curr_wind ) {
+		angle = 2.0*M_PI*(m_curr_wind - newwind);
+    		m_h.rotate(angle, (int)round(m_centrex_rot), duneglobals::ny()/2, 1);
+    		m_h_nonerod.rotate(angle, (int)round(m_centrex_rot), duneglobals::ny()/2, 0);
+		if(m_calc_veget){
+			m_veget.rotate(angle, (int)round(m_centrex_rot), duneglobals::ny()/2, 0);
+			m_veget_pos.rotate(angle, (int)round(m_centrex_rot), duneglobals::ny()/2, 0);
+		}
+    	m_curr_wind= newwind;
+  	}
+	angle = -2.0*M_PI*newwind*0.0;
+  	
+	m_calcshear->set_ustar(m_ustar0);
+  
+
+  	if(m_calc_veget) halfmeanLength = m_calcshear->Calc( m_h, m_tau, m_veget );
+	
+
+  	else halfmeanLength = m_calcshear->Calc( m_h, m_tau);
+
+
+
+	m_influx->set( m_flux, m_Satflux_upwind, angle );	// 100 set influx
+  	m_gamma.SetAll(0.0);
+  	m_calcflux->calc( m_flux, m_h, m_h_nonerod, m_tau, m_gamma );
+	 
+
+
+  	timestep= update_height(halfmeanLength);
+
+  }else{
+  	timestep = m_dtmax;
+	m_maxchange = 0;
+  }
+ 
+  
+  m_avalanche->calc(m_h, m_h_nonerod);
+
+  if(m_calc_veget){
+  	x_ext = vegetation_evol(timestep, evolution::time());
+  	double arg = 2.0*M_PI*(m_omega*evolution::time()+0.25);
+  	factor = 0.5*(1-cos(arg));
+  	/*if(m_calc_analyze){
+  		meanFlux = 0; 
+		meanVegetRho = 0;
+		double partialVegetRho = 0;
+  		int N = 0;
+  		for (int y=0; y<duneglobals::ny(); y++) {
+    			for (int x=0; x<duneglobals::nx(); x++) {
+	    			if(m_h(x,y)>1e-2){
+    					meanFlux += sqrt(m_flux(x,y)[0]*m_flux(x,y)[0] + m_flux(x,y)[1]*m_flux(x,y)[1]);
+					partialVegetRho = m_rhofactor* m_veget(x,y)*m_veget(x,y);
+					meanVegetRho += (partialVegetRho < 0.9 ? partialVegetRho: 0.);
+					N++;
+				}
+    			}
+  		}
+  		meanFlux /= N;
+		meanVegetRho /= N;
+  	}*/
+  }
+  /*if( m_fix_every && !--m_fix_count ) {
+    m_h_nonerod= m_h;
+    m_fix_count= m_fix_every;
+  }*/
+  if( m_shiftback )	m_shift_dist_x = shiftback(x_ext);
+  
+  if(m_calc_analyze)
+  	m_analyze->Calc(0, timestep, m_shift_dist_x*duneglobals::dx(), m_maxchange, halfmeanLength, m_qin/duneglobals::ny(), m_qout/duneglobals::ny(), m_ustar0, factor/*meanVegetRho*/, m_h);
+  
+  return timestep;
+}
+
+
+
+/*!  Computes the height profile change from the divergence of the sand flux. The return value is the time step.  */
+
+double dune_evol_3d::update_height(double halfmeanLength)
+{
+  double hmax, dhmax, timestep;
+  int x, y;
+
+  m_maxchange= 0.0;
+  //hmax= 0.0;
+  // ---> periodic boundary conditions;
+
+  for( y= 0; y< duneglobals::ny(); ++y ){
+    for( x= 0; x< duneglobals::nx(); ++x ) {
+      m_dh_dt(x, y) = -m_gamma(x, y) / duneglobals::rho_sand();
+     //if( m_dh_dt(x, y) < m_maxchange )	m_maxchange= fabs(m_dh_dt(x, y));
+     if( fabs(m_dh_dt(x, y)) > m_maxchange )	m_maxchange= fabs(m_dh_dt(x, y));
+
+     //if( m_h(x, y) > hmax && (m_calc_veget && m_dh_dt(x, y)!=0))	hmax= m_h(x, y);
+    }
+  }
+
+  // time step selection 
+   //dhmax = 1.6e-3*halfmeanLength;
+   dhmax= (halfmeanLength > 625.*m_dhmax? 1.6e-3*halfmeanLength : m_dhmax);
+   if( m_dtmax<=0.0 ){
+   	timestep = 0.25*(dhmax < 1e-6 ? 1e-3 : dhmax)* halfmeanLength * duneglobals::rho_sand()/m_Satflux_upwind;
+	
+	if(timestep > m_dhmax/m_maxchange)	timestep = m_dhmax/m_maxchange;
+   }else timestep = m_dtmax;
+   //if(m_maxchange*m_dtmax > m_dhmax)	timestep = m_dhmax/m_maxchange;
+   //else	timestep = m_dtmax;
+   
+   if(m_x_periodic)	
+   	for( y= 0; y< duneglobals::ny(); ++y )
+		m_dh_dt(0,y)= (m_h(duneglobals::nx()-1,y)-m_h(0,y))/timestep + m_dh_dt(duneglobals::nx()-1,y);
+
+  // Flux calculation
+  m_qin=0.0;
+  m_qout= 0.0;
+  for( y=0; y< duneglobals::ny(); y++) {
+  	m_qin+= m_flux(0,y)[0];
+   	m_qout+= m_flux(duneglobals::nx()-1,y)[0];
+  }
+  /*for( x=0; x< duneglobals::nx(); x++){
+  	m_qout-= (m_flux(x,0)[1]<0 ? m_flux(x,0)[1] : 0.);
+   	m_qout+= (m_flux(x,duneglobals::ny()-1)[1]>0 ? m_flux(x,duneglobals::ny()-1)[1] : 0.);
+  }*/
+  
+ 
+  // Volume correction
+  if(m_vol_correct && m_maxchange> 1e-10){
+	volume_correction( timestep);
+  }
+
+ 
+  // height update
+  // ---> periodic boundary conditions
+  for( y= 0; y< duneglobals::ny(); ++y ){
+    for( x= m_update_xmin+(m_x_periodic? 1 : 0); x< duneglobals::nx(); ++x )
+    {
+      m_h(x, y) += timestep * m_dh_dt(x, y);
+      if( m_h(x, y) < m_h_nonerod(x, y) )	m_h(x, y) = m_h_nonerod(x, y);
+    }
+    if(m_x_periodic)	m_h(0,y) = m_h(duneglobals::nx()-1,y);
+    else		m_h(duneglobals::nx()-1,y) = m_h(duneglobals::nx()-2,y);
+  }
+
+  return timestep;
+}
+
+/*!  Computes the correction in the volume to enforce the mass conservation.  */
+
+void dune_evol_3d::volume_correction(double timestep)
+{
+    double dVReal, dV= 0, dVh= 0, dVh2= 0, dV_ex_correction= 0, Dex, dV_correction, dV_correction2, dx2= duneglobals::dx()*duneglobals::dx();
+    int x,y;
+
+  	dVReal = (m_qin - m_qout) * duneglobals::dx()/duneglobals::rho_sand();
+	
+	dV = m_dh_dt.Integrate();
+	
+	for( y= 0; y< duneglobals::ny(); ++y ){
+         for( x= 0; x< duneglobals::nx(); ++x ){
+	   Dex= (m_h_nonerod(x,y)-m_h(x,y))/timestep - m_dh_dt(x,y);
+	   if(Dex > 0) dV_ex_correction-= Dex;
+           if(m_h(x,y) - m_h_nonerod(x,y) > timestep*m_maxchange && fabs(m_dh_dt(x,y))>1e-2*m_maxchange){
+              if((dVReal-dV)*m_dh_dt(x,y) < 0)
+	      	dVh+= m_h(x,y) - m_h_nonerod(x,y);
+	      if(m_h(x,y) - m_h_nonerod(x,y) < 10.0*timestep*m_maxchange)
+	         dVh2++;
+           }
+        }
+      }
+      dV_ex_correction*= dx2;
+      dVh2*= dx2;
+      dVh*= dx2;
+      dV_correction = (dVh > 0 ? (dVReal-dV)/dVh : 0);
+      dV_correction2 = (dVh2 > 0 ? dV_ex_correction/dVh2 : 0);
+      for ( y=0; y < duneglobals::ny(); y++) {
+	for ( x=0; x < duneglobals::nx(); x++) {
+	  if(m_h(x,y) - m_h_nonerod(x,y) > timestep*m_maxchange && fabs(m_dh_dt(x,y))>1e-2*m_maxchange){
+	    if((dVReal-dV)*m_dh_dt(x,y) < 0)
+	    	m_dh_dt(x,y) += dV_correction * (m_h(x,y) - m_h_nonerod(x,y));
+
+	    if(m_h(x,y) - m_h_nonerod(x,y) < 10.0*timestep*m_maxchange)
+	        m_dh_dt(x,y) += dV_correction2;
+	   }
+	}
+      }
+}
+
+
+/*!  Computes the shiftback.  */
+
+double dune_evol_3d::shiftback(double x_ext)
+{ 
+    int x,y;
+
+    m_centrex= (m_calc_veget && !m_shiftback_centrex_cmT ? m_veget_haux.CenterOfMassX() : m_h.CenterOfMassX())/duneglobals::dx();
+    if(m_shiftback_centrex_cmT)	x_ext=0;
+    
+    if(m_centrex > 1 + 0.5*duneglobals::nx() && duneglobals::nx() - x_ext < 10){
+    	m_targetcentrex = duneglobals::nx() - 10;
+	m_centrex = x_ext;
+    }else{ 
+    	if(!m_shiftback_target_cm0)	m_targetcentrex= duneglobals::nx()*(duneglobals::nx() - x_ext < 10 ? 0.8 : 0.5);
+	//if(!m_shiftback_centrex_cmT)	m_centrex = m_analyze->Center();
+    }
+    if (m_centrex - m_targetcentrex > 1) {
+      		m_shift_dist_x++;
+      		for (y=0; y < duneglobals::ny(); y++) {
+			for (x=0; x < duneglobals::nx()-1; x++) {
+	  			m_h(x,y) = m_h(x+1,y);
+	  			m_h_nonerod(x,y) = m_h_nonerod(x+1,y);
+	  			if(m_calc_veget){
+	  				m_veget(x,y) = m_veget(x+1,y);
+	  				m_veget_pos(x,y) = m_veget_pos(x+1,y);
+	  			}
+			}
+			m_h(duneglobals::nx()-1,y) = m_h(duneglobals::nx()-2,y);
+			m_h_nonerod(duneglobals::nx()-1,y) = m_h_nonerod(duneglobals::nx()-2,y);
+			if(m_calc_veget){
+				m_veget(duneglobals::nx()-1,y) = m_veget(duneglobals::nx()-2,y);
+				m_veget_pos(duneglobals::nx()-1,y) = m_veget_pos(duneglobals::nx()-2,y);
+			}
+      		}
+    }
+    
+   return m_shift_dist_x;
+}
+
+/*!  Computes the evolution of the vegetation.  */
+
+int dune_evol_3d::vegetation_evol(const double timestep, const double time)
+{ 
+  int x_ext = 0;
+  //Vegetation growth rate definition
+  double arg = 2.0*M_PI*(m_omega*time+0.50);
+  double factor = 0.5*(1-cos(arg));
+  // double factor= 1.0;
+  double V = factor/m_t;
+  for( int y= 0; y< duneglobals::ny(); ++y )
+     for( int x= m_update_xmin_veget; x< duneglobals::nx(); ++x ){
+        //if(m_veget_root && m_veget_pos(x,y)>)
+        //localizing the head of the vegetated dune
+	if(x_ext < x && (m_veget(x,y) < 0.9*m_h_veget && m_h(x,y) > 1e-2))	x_ext= x;
+	
+	//condition for the spreading of vegetation
+        //m_veget_haux(x,y)= (m_veget(x,y)> 0.1*m_h_veget ? 0 : m_h(x,y));
+        if(m_veget(x,y) == 0 && m_dh_dt(x,y)>= 0){
+		//if(m_h(x,y) < 0.001 || (m_veget_haux(x-1,y) > 0 || m_veget_haux(x+1,y) > 0 || m_veget_haux(x,y-1) > 0 || m_veget_haux(x,y+1) > 0)){
+			m_veget(x,y)= 1e-3;
+			m_veget_pos(x,y)= m_h(x,y);
+		//}
+	}else if(m_veget(x,y) > 0 && m_veget_pos(x,y)-m_h(x,y)> m_veget(x,y)){
+		m_veget(x,y)= m_veget_pos(x,y)= 0;
+	}
+	
+	if( m_veget(x,y)>= 1e-3)
+		m_veget(x,y)+= timestep *((m_h_veget - m_veget(x,y))*V - fabs(m_dh_dt(x,y)));
+		//m_veget(x,y)+= timestep *((m_h_veget - m_veget(x,y))*(m_h(x,y) > factor ? 0. : V) - fabs(m_dh_dt(x,y)));
+	if(m_veget(x,y)< 1e-3) m_veget(x,y)= m_veget_pos(x,y)= 0;
+	if(m_veget(x,y) > m_h_veget) m_veget(x,y)= m_h_veget;
+	
+	//if(m_h(x,y) < 1e-3) m_veget(x,y)= m_h_veget;
+    	/*if(fabs(x-x0) < R && (y-y0)*(y-y0)<R*R-(x-x0)*(x-x0)){
+		m_veget(x,y)= m_veget_pos(x,y)= 0;
+	}*/
+    }
+  // Selecting free moving sand surface
+  for( int y= 0; y< duneglobals::ny(); ++y )
+    for( int x= m_update_xmin_veget; x< duneglobals::nx(); ++x ){
+    	m_veget_haux(x,y)= (m_veget(x,y)> 0.1*m_h_veget ? 0 : m_h(x,y));
+    }
+    //x_ext= 0;
+    
+    return x_ext;
+}
