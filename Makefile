@@ -38,8 +38,8 @@ HEADERS = $(HEADERS_MAIN:main.h=)
 
 Dune:	$(OBJECTS) $(PT_OBJECTS)
 	$(LINK) -o $@ $^ $(LFLAGS)
-	
-	cp Dune /Users/orencioduranvinent/bin/Dune_pnas
+
+###	cp Dune /Users/orencioduranvinent/bin/Dune_pnas
 
 %.o:	%.cc
 	$(C++) -c $(CFLAGS) $(INCPATH) -o $@ $<
