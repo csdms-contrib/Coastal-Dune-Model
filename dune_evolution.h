@@ -18,6 +18,7 @@ class analyze;
 class influx;
 class shore3d;
 class vegetation;
+class storm;
 
 ///*!  Base class of all classes handling the top level of the simulation and
 //  containing the height array.  */
@@ -77,6 +78,8 @@ protected:
     shore3d *m_shore;
     /*!  vegetation calculation object.  */
     vegetation *m_grass;
+    /*!  storm calculation object.  */
+    storm *m_storm;
     
     /*!  Analyze object.  */
     analyze *m_analyze;

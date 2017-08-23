@@ -58,7 +58,7 @@ flux3d_stationary::flux3d_stationary( const dunepar& parameters ): dunedata(para
 
     //!! BEACH
     m_calc_shore = parameters.getdefault("calc.shore", false);
-    m_tau_t_L = parameters.getdefault( "beach.tau_t_L", 0.0 );  // beach param!!!
+    m_tau_t_L = parameters.getdefault( "beach.tau_t_L", 0.05);  // beach param!!!
     m_watertable0 = duneglobals::MSL();//parameters.getdefault("shore.sealevel", 0.0);
     m_watertable = m_watertable0;
 }

@@ -3,7 +3,6 @@
  ******************************************************************************/
 
 #include <stdio.h>
-#include <cstring>      /*CRS*/
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -364,7 +363,7 @@ duneglobals::duneglobals( const dunepar& parameters )
         cerr << "duneglobals constructor:  Periodic boundary condition in x direction requires NX to be power of 2!  Aborting...\n";
         exit(1);
     }
-    m_periodic_y= parameters.getdefault( "calc.y_periodic", false );
+    m_periodic_y= parameters.getdefault( "calc.y_periodic", true );
     if( m_periodic_y && m_ny!=fft::GetNextPowerOf2(m_ny) ) {
         cerr << "duneglobals constructor:  Periodic boundary condition in y direction requires NY to be power of 2!  Aborting...\n";
         exit(1);
@@ -380,7 +379,7 @@ duneglobals::duneglobals( const dunepar& parameters )
     /* Shore parameters*/
     m_shore_HMWL = parameters.getdefault("shore.MHWL", 0.0);
     m_shore_watertable = parameters.getdefault("shore.sealevel", 0.0);
-    m_beach_angle = parameters.getdefault("beach.angle", 0.0);
+    m_beach_angle = parameters.getdefault("beach.angle", 1.0);
     m_beach_slope = tan(m_beach_angle * M_PI / 180.);
 
     /* Real Time / Sim Time */

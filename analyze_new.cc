@@ -100,30 +100,70 @@ analyze::analyze(const dunepar& P)
 }
 
 
-void analyze::Calc(int t, double time,
-	double qin, double qout, const TFktScal& m_h, const TFktScal& m_rhoveg)
+void analyze::Calc(int t, double time, double shift_dist_x, int m_shoreline, double m_shorelinechange, int m_veget_X0,
+	double qin, double qout, double m_ustar0, double surge, const TFktScal& m_h, const TFktScal& m_rhoveg)
 {
+	//m_dTime += timestep;
 
 	// calc dune properties
 	const double dHMax = m_h.GetMax();
 	const double RhoMax = m_rhoveg.GetMax();
     
+    double H1X1 = m_h.GetFirstMax();
+    double X1 = floor(H1X1/10000);
+    double H1 = H1X1 - X1*10000;
+
+    double H0 = 0;
+    double veget0 = 0;
+    for (int y=0; y<m_h.SizeY(); y++) {
+        H0 += 0.5*(m_h(m_shoreline+m_veget_X0+4,y)+m_h(m_shoreline+m_veget_X0+5,y));
+        veget0 += m_rhoveg(m_shoreline+m_veget_X0+1,y);
+    }
+	H0 /= m_h.SizeY();
+	veget0 /= m_h.SizeY();
+
 	// ---- volume / mass ----
 
 	const double dVol= m_h.Integrate(0);
+
+	// ----- max h ----
+	double hmax = 0, hmaxc = 0, hmaxd = 0;
+	int yc = 0;
+	double hmaxY = 0;
+	for (int y=0; y<m_h.SizeY(); y++) {
+		hmaxY = 0;
+		for (int x=0; x<m_h.SizeX(); x++) {
+			if (hmaxY < m_h(x,y)) {
+				hmaxY = m_h(x,y);
+			}
+		}
+		// include only regions < Hc
+		if (hmaxY < duneglobals::HMWL() + m_zmin)
+		{
+			hmaxc += hmaxY;
+			yc++;
+		} else {
+			hmaxd += hmaxY;
+		}
+		hmax+=hmaxY;
+	}
+	hmax /= m_h.SizeY();
+	hmaxc /= (yc > 0 ? yc : 1);
+	hmaxd /= m_h.SizeY()-yc;
     
     // --- TIME ----
     double realtime = time/duneglobals::secyear()/duneglobals::timefrac(); // years
+    // --- Shoreline rate of change ---
+    double SR = m_shorelinechange; // / realtime;
 
 	// ---- write data ----
 
 	m_os << t << " "                    								// 1: iterations
-		<< realtime << " " 	// 2: time in yr
+		<< time/duneglobals::secyear()/duneglobals::timefrac() << " " 	// 2: time in yr
 		<< dHMax-duneglobals::HMWL() << " "                				// 3: maximum height
 		<< RhoMax << " " 												// 4: maximum cover	
 		<< dVol << " "                 									// 5: volume / mass of sand
-		<< qin << " "                  									// 7: dune in flux
-		<< qout << " "                 									// 8: dune out flux
+		<< SR << " "	      											// 6: shoreline change (m)
 		<< endl;
 }
 

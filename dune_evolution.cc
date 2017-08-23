@@ -17,6 +17,7 @@
 #include "shear_hlr.h"
 #include "shore.h"
 #include "vegetation.h"
+#include "storm.h"
 #include "analyze_new.h"
 
 #include "func.h"
@@ -47,6 +48,7 @@ dune_evol_3d::dune_evol_3d(const dunepar& par) : evolution(par)
     
     m_shore= new shore3d(par);
     m_grass= new vegetation(par);
+    m_storm = new storm(par);
     
     m_analyze = new analyze(par);
     
@@ -54,10 +56,11 @@ dune_evol_3d::dune_evol_3d(const dunepar& par) : evolution(par)
     m_x_periodic= duneglobals::periodic_x();
     m_y_periodic= duneglobals::periodic_y();
     
-    m_dtmax = par.getdefault("dt_max", 0.0);
+    m_dtmax = par.getdefault("dt_max", 1000.0);
     m_shiftback = par.getdefault("calc.shift_back", true);
     m_shiftback_target_cm0= par.getdefault("shift_back.cm0", false);
     m_shiftback_centrex_cmT= par.getdefault("shift_back.cmT", true);
+
     m_shift_dist_x= m_shift_dist_y= 0.0;
     m_vol_correct = par.getdefault("calc.volume.correction", true);
     m_calc_analyze = par.getdefault("calc.analyze", true);
@@ -66,8 +69,13 @@ dune_evol_3d::dune_evol_3d(const dunepar& par) : evolution(par)
     m_wind_factor = par.getdefault("wind.fraction", 1.0);
     
     /* Shore parameters */
-    m_calc_shore = par.getdefault("calc.shore", false);
+    m_calc_shore = par.getdefault("calc.shore", true);
+    m_shoremotion = par.getdefault("shore.motion", 1.0);
     
+    /* Storm parameters */
+    m_calc_storm0 = par.getdefault("calc.storm", false);
+    m_calc_storm = m_calc_storm0;   // temporal storm variable
+
     /*Functions creation*/
     m_h.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx(), 0.0);
     m_h0.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx(), 0.0);
@@ -80,6 +88,8 @@ dune_evol_3d::dune_evol_3d(const dunepar& par) : evolution(par)
     m_gamma.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx(), 0.0);
     
     m_rho_veget.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx(), 0.0);
+
+    m_overwash.Create( duneglobals::nx(), duneglobals::ny(), duneglobals::dx(), 0.0);
 
     /* Surface initialization*/
     init(par);
@@ -197,23 +207,59 @@ double dune_evol_3d::step_implementation()
     }else{
         timestep = m_dtmax;
     }
-           
+    
+    /*STORMS*/
+    if (m_calc_storm0) {
+        m_surge = 0;
+        if (m_calc_storm) {
+            m_surge = m_storm->impact( m_shoreline, m_h, m_h_nonerod, m_overwash );
+            /* no innundation condition */
+            if (m_surge < 0)
+            {
+                /* code */
+                m_h = m_h0; // restore initial profile
+                m_surge *= -1.0;
+                m_surge += 1000; // identify inundation
+            }
+        }
+        m_storm->stop( evolution::time(), timestep, m_calc_storm);
+    }
+    
+    // SHIFT AND SHORE
+    if (m_calc_shore) {
+        // Shoreline calculation
+        // Shore motion
+        int shoreshift = (m_shoremotion ? m_shore->shorefacemotion(m_h, timestep) : 0);
+        m_shorelinechange += shoreshift * duneglobals::dx();
+        if(abs(shoreshift) > 0) m_shift_dist_x = shiftback(shoreshift);
+        // Restore shoreface
+        m_shore->restoreshoreface( m_h );
+    } else {
+        m_shift_dist_x = shiftback(0);
+    }
+    
     // VEGETATION
     int m_veget_X0;
     if (m_calc_veget) {
-        m_veget_X0 = m_grass->evol(m_rho_veget, evolution::time(), timestep, m_shoreline, m_h, m_dh_dt);
+        m_veget_X0 = m_grass->evol(m_rho_veget, evolution::time(), timestep, m_shoreline, m_h, m_dh_dt, m_overwash);
     }
     
     // PROCESS DATA
     if(m_calc_analyze){
 
+        // Rescaling
+        m_flux.rescale(m_Satflux_upwind);
+
         int steps = evolution::time() / timestep;
         int process = (steps % 50 == 0 ? 1 : 0);
-        if (process) {
-            m_analyze->Calc(steps, evolution::time(), m_qin/m_Satflux_upwind/duneglobals::ny(), m_qout/m_Satflux_upwind/duneglobals::ny(), m_h, m_rho_veget);
+        if (process || m_surge > 0) {
+            // // Rescaling
+            // m_flux.rescale(m_Satflux_upwind);
+            m_analyze->Calc(steps, evolution::time(), m_shift_dist_x*duneglobals::dx(), m_shoreline, m_shorelinechange, m_veget_X0, m_qin/m_Satflux_upwind/duneglobals::ny(), m_qout/m_Satflux_upwind/duneglobals::ny(), m_ustar0, m_surge, m_h, m_rho_veget);
             // prevent saving storms many times
         }
     }
+    
 
     return timestep;
 }

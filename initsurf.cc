@@ -7,13 +7,8 @@
 
 #include "func.h"
 #include "initsurf.h"
-#include "initsurfgauss.h"
-#include "initsurfwaves.h"
 #include "initsurfbeach.h"
-#include "initsurfmatlab.h"
-#include "initsurfparabol.h"
 #include "initsurfalea.h"
-#include "initsurfcone.h"
 
 //*****************************************************************************
 // class arrayinit
@@ -57,30 +52,14 @@ arrayinit *arrayinit::create(const dunepar& par, string prefix)
   arrayinit *object;
   
   string strType = par.getrequired<string>(prefix + "Init-Surf");
-  if (strType == "gauss") {
-    object = new CInitSurfGauss(par, prefix);
-  } else if (strType == "waves") {
-    object = new CInitSurfWaves(par, prefix);
-  } else if (strType == "alea") {
+  if (strType == "alea") {
     object = new CInitSurfAlea(par, prefix);
-  } else if (strType == "paraboloid") {
-    object = new arrayinit_paraboloid(par, prefix);
-  } else if (strType == "parabola") {
-    object = new CInitSurfParabol(par, prefix);
-  } else if (strType == "matlab") {
-    object = new CInitSurfMatlab(par, prefix);
   } else if (strType == "init_h") {
     object = new arrayinit_ascii(par, prefix);
-  } else if (strType == "ridge") {
-    object = new arrayinit_ridge(par, prefix);
   } else if (strType == "plain") {
     object = new CInitSurfPlain(par, prefix);
   } else if (strType == "beach") {
     object = new CInitSurfBeach(par, prefix);
-  } else if (strType == "cube") {
-    object = new arrayinit_cube(par, prefix);
-  }  else if (strType == "cone") {
-    object = new CInitSurfCone(par, prefix);
   } else {
     cout << "arrayinit::create: FATAL ERROR: Unknown value `" << strType << "\' for parameter `" << prefix << "Init-Surf\' !" << endl;
     cout << "  Valid values are: gauss, ridge, paraboloid, matlab, alea, init_h, plain" << endl;

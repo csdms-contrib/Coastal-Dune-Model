@@ -23,6 +23,8 @@ public:
     virtual double shorelinepos() { return m_shoreline; }
 
     virtual void shorelinecal(const TFktScal& h);
+    virtual void restoreshoreface(TFktScal& h);
+    virtual int shorefacemotion(TFktScal& h, double timestep);
     
     virtual void save_arrays();
     
@@ -32,6 +34,10 @@ protected:
     
     double m_watertable, m_shore_HMWL, m_slope, m_shoreline;
 
+    double m_sealevelrise;
+    double m_shoreface_lenght;
+    double m_shoreface_aspectratio;
+    double m_grad_alongshore;
 
 };
 

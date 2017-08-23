@@ -8,7 +8,7 @@ CSaveFields::CSaveFields(const dunepar& P) :
   m_bOff = P.getdefault("save.off", false);
   m_iEveryT = P.getdefault("save.every", 100);
   m_iT = 0;
-  m_bXLine = P.getdefault("save.x-line", true);
+  m_bXLine = P.getdefault("save.x-line", false);
 
   m_strDir = P.getdefault<string>("save.dir", "./");
   if (m_strDir[m_strDir.length()-1] != '/') {
